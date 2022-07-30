@@ -4,7 +4,7 @@ package excel
 
 import (
 	"fmt"
-	"go-excel/common"
+	"github.com/longtimenoseehx/go-excel/common"
 	"mime/multipart"
 	"reflect"
 	"strconv"

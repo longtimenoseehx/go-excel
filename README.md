@@ -31,7 +31,7 @@ For Example：
 // sheetName: the sheetname in excel file to be create
 // dataSlice: the source data you want to parse (support: struct, ptr of struct, struct slice, struct array...all like this)
 // templateStruct: elem type of previous param (support: struct or ptr of struct)
-// filter: a map with key is excel tag'value, used to filter the field that you are not want to export
+// filter: the map'key is excel tag'value, and map'value is useless. used to filter the field that you are not want to export
 excelFile, err := excel.ExportStructSlice2Excel(sheetName string, dataSlice interface{}, templateStruct interface{}, filter map[string]string)
 if err != nil {
     // ...

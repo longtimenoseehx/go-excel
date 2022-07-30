@@ -1,4 +1,4 @@
-module go-excel
+module github.com/longtimenoseehx/go-excel
 
 go 1.18
 
