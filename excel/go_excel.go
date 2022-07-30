@@ -21,10 +21,7 @@ func ImportExcel2StructSlice(file *multipart.File, templateStruct interface{}) (
 	if err != nil {
 		return nil, common.ExcelOptErr
 	}
-	rows, sheetErr := xlsx.GetRows(xlsx.GetSheetMap()[1])
-	if sheetErr != nil {
-		return nil, common.ExcelOptErr
-	}
+	rows := xlsx.GetRows(xlsx.GetSheetMap()[1])
 
 	_, colFieldMap, serveError := getStructTagFieldMap(templateStruct, nil)
 	if serveError != nil {
