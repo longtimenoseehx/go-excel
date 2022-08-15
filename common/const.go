@@ -3,3 +3,9 @@
 package common
 
 const ExcelTag = "excel"
+const SEPARATE = ";"
+const (
+	Xls  = "xls"
+	Xlsx = "xlsx"
+	Csv  = "csv"
+)

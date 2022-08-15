@@ -3,44 +3,74 @@
 package excel
 
 import (
+	"encoding/csv"
 	"fmt"
 	"github.com/longtimenoseehx/go-excel/common"
+	"github.com/xuri/excelize/v2"
 	"mime/multipart"
 	"reflect"
 	"strconv"
+	"strings"
 
-	"github.com/360EntSecGroup-Skylar/excelize"
 	"github.com/tealeg/xlsx"
 )
 
-// ImportExcel2StructSlice 导入
-// params: file xlsx包下的file结构体指针, templateStruct 要解析到的结构体(需要有excel标签)
-// returns:  []templateStruct, err
-func ImportExcel2StructSlice(file *multipart.File, templateStruct interface{}) (*[]interface{}, error) {
-	xlsx, err := excelize.OpenReader(*file)
-	if err != nil {
-		return nil, common.ExcelOptErr
-	}
-	rows := xlsx.GetRows(xlsx.GetSheetMap()[1])
+type importMapper struct {
+	templateStruct interface{}
+	data           [][]string
+}
 
-	_, colFieldMap, serveError := getStructTagFieldMap(templateStruct, nil)
+// NewImportMapper 创建一个excel导入映射器
+// params: 源数据切片,模版结构体
+func NewImportMapper(data [][]string, templateStruct interface{}) *importMapper {
+	return &importMapper{data: data, templateStruct: templateStruct}
+}
+
+type exportMapper struct {
+	sheet          string
+	templateStruct interface{}
+	filter         map[string]string
+	dataSlice      interface{}
+}
+
+// NewExportMapper 创建一个excel导出映射器
+// params: sheet名, 模版结构体, 源数据, 过滤列
+func NewExportMapper(sheetName string, templateStruct interface{}, sourceData interface{}, filter map[string]string) *exportMapper {
+	return &exportMapper{sheet: sheetName, templateStruct: templateStruct, filter: filter, dataSlice: sourceData}
+}
+
+// Run 导入
+// returns:  *[]templateStruct, err
+func (mapper *importMapper) Run() (*[]interface{}, error) {
+	tagValSlice, colFieldMap, serveError := parseStructExcelFieldInfo(mapper.templateStruct, nil)
 	if serveError != nil {
 		return nil, serveError
 	}
 
 	var result []interface{}
-	var fieldSlice []string
-	for idx, row := range rows {
-		if idx == 0 {
-			for _, colName := range row {
-				if fieldName, ok := colFieldMap[colName]; ok {
-					fieldSlice = append(fieldSlice, fieldName)
-				} else {
-					return nil, common.ColNotMatchFieldErr
+	IdxFieldMap := make(map[int]string, len(tagValSlice))
+	for rowIdx, row := range mapper.data {
+		if rowIdx == 0 {
+			for colIdx, col := range row {
+				if len(col) == 0 {
+					continue
+				}
+				// 遍历第一行，构建[][]string列索引 -> 结构体字段名的映射
+				if fieldName, ok := colFieldMap[col]; ok {
+					IdxFieldMap[colIdx] = fieldName
+					delete(colFieldMap, col)
 				}
 			}
 		} else {
-			newStruct, parseErr := setRow2StructField(templateStruct, idx+1, row, fieldSlice)
+			// 检查必填栏，缺失则报错
+			if len(colFieldMap) > 0 {
+				for _, val := range tagValSlice {
+					if _, ok := colFieldMap[val[1:]]; ok && strings.HasPrefix(val, "*") {
+						return nil, common.LackRequiredColOf(val[1:])
+					}
+				}
+			}
+			newStruct, parseErr := setRow2StructField(mapper.templateStruct, rowIdx, row, IdxFieldMap)
 			if parseErr != nil {
 				return nil, parseErr
 			}
@@ -50,40 +80,44 @@ func ImportExcel2StructSlice(file *multipart.File, templateStruct interface{}) (
 	return &result, nil
 }
 
-// ExportStructSlice2Excel 导出
-// params: sheetName导出的sheet名, dataSlice数据源(支持结构体/结构体切片/结构体指针/结构体指针切片),
-//		   templateStruct数据源对应的结构体(支持结构体/结构体指针), filter导出时需要过滤掉的字段(key:结构体中excel标签的值(列名),value:不限)
+// Run 导出
 // returns:  file文件指针, err
-func ExportStructSlice2Excel(sheetName string, dataSlice interface{}, templateStruct interface{}, filter map[string]string) (*xlsx.File, error) {
-	if dataSlice == nil {
+func (mapper *exportMapper) Run() (*xlsx.File, error) {
+	if mapper.dataSlice == nil {
 		return nil, common.NilParamErr
 	}
 	file := xlsx.NewFile()
-	sheet, err := file.AddSheet(sheetName)
+	sheet, err := file.AddSheet(mapper.sheet)
 	if err != nil {
 		return file, common.ExcelOptErr
 	}
 
-	colSlice, colFieldMap, parseStructErr := getStructTagFieldMap(templateStruct, filter)
+	tagValSlice, colFieldMap, parseStructErr := parseStructExcelFieldInfo(mapper.templateStruct, mapper.filter)
 	if parseStructErr != nil {
 		return nil, parseStructErr
 	}
 
 	var fieldSlice []string
 
-	titleStyle := getTitleStyle()
+	requireStyle := getTitleStyle(true)
+	commonStyle := getTitleStyle(false)
 	row := sheet.AddRow()
 	var cell *xlsx.Cell
-	for _, colName := range colSlice {
+	for _, tagVal := range tagValSlice {
 		cell = row.AddCell()
-		cell.Value = colName
-		cell.SetStyle(titleStyle)
-		if fieldName, ok := colFieldMap[colName]; ok {
+		if strings.HasPrefix(tagVal, "*") {
+			tagVal = tagVal[1:]
+			cell.SetStyle(requireStyle)
+		} else {
+			cell.SetStyle(commonStyle)
+		}
+		cell.Value = tagVal
+		if fieldName, ok := colFieldMap[tagVal]; ok {
 			fieldSlice = append(fieldSlice, fieldName)
 		}
 	}
 
-	getValue := reflect.ValueOf(dataSlice)
+	getValue := reflect.ValueOf(mapper.dataSlice)
 	if getValue.Kind() == reflect.Ptr {
 		getValue = getValue.Elem()
 	}
@@ -107,10 +141,10 @@ func ExportStructSlice2Excel(sheetName string, dataSlice interface{}, templateSt
 	return file, nil
 }
 
-// getStructTagFieldMap 解析结构体中的自定义excel标签
+// parseStructExcelFieldInfo 解析结构体中的自定义excel标签
 // params: templateStruct目标结构体(支持结构体/结构体指针), filter解析时需要过滤掉的字段(key:结构体中excel标签的值(列名),value:不限)
-// returns: 结构体字段excel标签值(excel列名)数组, excel标签->字段名的映射, err
-func getStructTagFieldMap(templateStruct interface{}, filter map[string]string) ([]string, map[string]string, error) {
+// returns: 结构体字段的excel标签值的数组, excel列名->字段名的映射, err
+func parseStructExcelFieldInfo(templateStruct interface{}, filter map[string]string) ([]string, map[string]string, error) {
 	if templateStruct == nil {
 		return nil, nil, common.NilParamErr
 	}
@@ -119,34 +153,39 @@ func getStructTagFieldMap(templateStruct interface{}, filter map[string]string) 
 		getType = getType.Elem()
 	}
 	if getType.Kind() != reflect.Struct {
-		return nil, nil, common.TargetTypeNotSupportErr
+		return nil, nil, common.TemplateTypeNotSupportErr
 	}
 
-	columnsSlice := make([]string, 0)
+	tagValSlice := make([]string, 0)
 	colFieldMap := make(map[string]string, getType.NumField())
 	for i := 0; i < getType.NumField(); i++ {
-		colName, needExport := getType.Field(i).Tag.Lookup(common.ExcelTag)
-		if _, exist := filter[colName]; exist || !needExport {
+		tagVal, needExport := getType.Field(i).Tag.Lookup(common.ExcelTag)
+		if _, exist := filter[tagVal]; exist || !needExport {
 			continue
 		}
-		columnsSlice = append(columnsSlice, colName)
-		colFieldMap[colName] = getType.Field(i).Name
+		tagValSlice = append(tagValSlice, tagVal)
+		if strings.HasPrefix(tagVal, "*") {
+			tagVal = tagVal[1:]
+		}
+		colFieldMap[tagVal] = getType.Field(i).Name
 	}
-	if len(columnsSlice) == 0 || len(colFieldMap) == 0 {
+	if len(colFieldMap) == 0 || len(tagValSlice) == 0 {
 		return nil, nil, common.TagNotFoundErr
 	}
-	return columnsSlice, colFieldMap, nil
+	return tagValSlice, colFieldMap, nil
 }
 
 // getTitleStyle 生成excel标题样式
-func getTitleStyle() *xlsx.Style {
+func getTitleStyle(require bool) *xlsx.Style {
 	centerHAlign := *xlsx.DefaultAlignment()
 	centerHAlign.Horizontal = "center"
 	centerHAlign.Vertical = "center"
 	titleStyle := xlsx.NewStyle()
 	font := *xlsx.NewFont(14, "等线")
-	font.Bold = true
 	titleStyle.Font = font
+	if require {
+		titleStyle.Font.Color = xlsx.RGB_Dark_Red
+	}
 	titleStyle.Alignment = centerHAlign
 	titleStyle.ApplyAlignment = true
 	titleStyle.ApplyBorder = true
@@ -155,10 +194,10 @@ func getTitleStyle() *xlsx.Style {
 }
 
 // setRow2StructField 导入时使用的工具函数： 解析excel表格中的一行到指定结构体templateStruct
-// params: templateStruct目标结构体, rowId行号, row行数据, fieldSlice列名对应的结构体字段名的切片(注意字段名顺序要和列名保持一致)
+// params: templateStruct目标结构体, rowIdx行号 row行数据, fieldSlice列名对应的结构体字段名的切片(注意字段名顺序要和列名保持一致)
 // returns: 目标结构体, err
-func setRow2StructField(templateStruct interface{}, rowId int, row []string, fieldSlice []string) (interface{}, error) {
-	if templateStruct == nil || len(row) == 0 || len(fieldSlice) == 0 {
+func setRow2StructField(templateStruct interface{}, rowIdx int, row []string, IdxFieldMap map[int]string) (interface{}, error) {
+	if templateStruct == nil || len(row) == 0 || len(IdxFieldMap) == 0 {
 		return nil, common.NilParamErr
 	}
 	t := reflect.TypeOf(templateStruct)
@@ -166,7 +205,7 @@ func setRow2StructField(templateStruct interface{}, rowId int, row []string, fie
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
-		return nil, common.TargetTypeNotSupportErr
+		return nil, common.TemplateTypeNotSupportErr
 	}
 
 	newStruct := reflect.New(t)
@@ -174,59 +213,68 @@ func setRow2StructField(templateStruct interface{}, rowId int, row []string, fie
 		newStruct = newStruct.Elem()
 	}
 	if newStruct.Kind() != reflect.Struct {
-		return nil, common.TargetTypeNotSupportErr
+		return nil, common.TemplateTypeNotSupportErr
 	}
-	for i, cell := range row {
-		if len(cell) == 0 {
-			continue
-		}
-		fieldName := fieldSlice[i]
+	for colIdx, fieldName := range IdxFieldMap {
 		fieldVal := newStruct.FieldByName(fieldName)
 		structField, hasField := t.FieldByName(fieldName)
 		if !hasField {
 			return nil, common.ColNotMatchFieldErr
 		}
+
+		var cell string
+		if rowIdx < len(row) {
+			cell = row[colIdx]
+		}
+		// 如果单元格值为空，查看是否为必填项，是则报错。
+		if len(cell) == 0 {
+			if tagVal, ok := structField.Tag.Lookup(common.ExcelTag); ok && strings.HasPrefix(tagVal, "*") {
+				return nil, common.LackRequiredParamOn(rowIdx, colIdx)
+			}
+			continue
+		}
+		// 开始解析数据
 		switch structField.Type.Kind() {
 		case reflect.String:
 			fieldVal.SetString(cell)
 		case reflect.Int:
 			parseInt, err := strconv.Atoi(cell)
 			if err != nil {
-				return nil, common.DataParseErrOn(rowId, i, reflect.Int.String())
+				return nil, common.ParamTypeErrOn(rowIdx, colIdx, common.Int)
 			}
 			fieldVal.SetInt(int64(parseInt))
 		case reflect.Int32:
 			parseInt, err := strconv.ParseInt(cell, 10, 32)
 			if err != nil {
-				return nil, common.DataParseErrOn(rowId, i, reflect.Int32.String())
+				return nil, common.ParamTypeErrOn(rowIdx, colIdx, common.Int)
 			}
 			fieldVal.SetInt(parseInt)
 		case reflect.Int64:
 			parseInt, err := strconv.ParseInt(cell, 10, 64)
 			if err != nil {
-				return nil, common.DataParseErrOn(rowId, i, reflect.Int64.String())
+				return nil, common.ParamTypeErrOn(rowIdx, colIdx, common.Int)
 			}
 			fieldVal.SetInt(parseInt)
 		case reflect.Float32:
 			float, err := strconv.ParseFloat(cell, 32)
 			if err != nil {
-				return nil, common.DataParseErrOn(rowId, i, reflect.Float32.String())
+				return nil, common.ParamTypeErrOn(rowIdx, colIdx, common.Float)
 			}
 			fieldVal.SetFloat(float)
 		case reflect.Float64:
 			float, err := strconv.ParseFloat(cell, 64)
 			if err != nil {
-				return nil, common.DataParseErrOn(rowId, i, reflect.Float64.String())
+				return nil, common.ParamTypeErrOn(rowIdx, colIdx, common.Float)
 			}
 			fieldVal.SetFloat(float)
 		case reflect.Bool:
 			parseBool, err := strconv.ParseBool(cell)
 			if err != nil {
-				return nil, common.DataParseErrOn(rowId, i, reflect.Bool.String())
+				return nil, common.ParamTypeErrOn(rowIdx, colIdx, common.Bool)
 			}
 			fieldVal.SetBool(parseBool)
 		default:
-			return nil, common.TypeNotSupport(structField.Type.Kind().String())
+			return nil, common.TypeNotSupport(fieldName)
 		}
 	}
 	return newStruct.Interface(), nil
@@ -239,7 +287,7 @@ func setStruct2ExcelRow(sheet *xlsx.Sheet, value reflect.Value, fieldSlice []str
 		value = value.Elem()
 	}
 	if value.Kind() != reflect.Struct {
-		return common.TargetTypeNotSupportErr
+		return common.TemplateTypeNotSupportErr
 	}
 	row := sheet.AddRow()
 	var cell *xlsx.Cell
@@ -266,4 +314,48 @@ func setStruct2ExcelRow(sheet *xlsx.Sheet, value reflect.Value, fieldSlice []str
 		}
 	}
 	return nil
+}
+
+// CheckAndReadExcel 检查导入的excel文件格式, 并返回读取出的数据切片
+func CheckAndReadExcel(file *multipart.File, fileHeader *multipart.FileHeader) ([][]string, error) {
+	var recordSlice [][]string
+	var readErr error
+	fileNameArr := strings.Split(fileHeader.Filename, ".")
+	switch fileNameArr[len(fileNameArr)-1] {
+	case common.Xls:
+		fallthrough
+	case common.Xlsx:
+		recordSlice, readErr = readXlsx(file)
+	case common.Csv:
+		recordSlice, readErr = readCsv(file)
+	default:
+		return nil, common.ExcelFormatErr
+	}
+	if readErr != nil {
+		return nil, common.ExcelOptErr
+	}
+	return recordSlice, nil
+}
+
+func readXlsx(file *multipart.File) ([][]string, error) {
+	xlsx, err := excelize.OpenReader(*file)
+	if err != nil {
+		return nil, err
+	}
+	rows, getRowErr := xlsx.GetRows(xlsx.GetSheetMap()[1])
+	if getRowErr != nil {
+		return nil, getRowErr
+	}
+	return rows, nil
+}
+
+func readCsv(file *multipart.File) ([][]string, error) {
+	reader := csv.NewReader(*file)
+	reader.FieldsPerRecord = -1
+	reader.LazyQuotes = true
+	records, readErr := reader.ReadAll()
+	if readErr != nil {
+		return nil, readErr
+	}
+	return records, nil
 }
