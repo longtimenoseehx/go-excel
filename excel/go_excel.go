@@ -1,5 +1,5 @@
 // Package excel
-// @Author Administrator 2022/7/30 14:48:00
+// @Author Binary.H 2022/7/30 14:48:00
 package excel
 
 import (
@@ -11,33 +11,10 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tealeg/xlsx"
 )
-
-type importMapper struct {
-	templateStruct interface{}
-	data           [][]string
-}
-
-// NewImportMapper 创建一个excel导入映射器
-// params: 源数据切片,模版结构体
-func NewImportMapper(data [][]string, templateStruct interface{}) *importMapper {
-	return &importMapper{data: data, templateStruct: templateStruct}
-}
-
-type exportMapper struct {
-	sheet          string
-	templateStruct interface{}
-	filter         map[string]string
-	dataSlice      interface{}
-}
-
-// NewExportMapper 创建一个excel导出映射器
-// params: sheet名, 模版结构体, 源数据, 过滤列
-func NewExportMapper(sheetName string, templateStruct interface{}, sourceData interface{}, filter map[string]string) *exportMapper {
-	return &exportMapper{sheet: sheetName, templateStruct: templateStruct, filter: filter, dataSlice: sourceData}
-}
 
 // Run 导入
 // returns:  *[]templateStruct, err
@@ -221,6 +198,9 @@ func setRow2StructField(templateStruct interface{}, rowIdx int, row []string, Id
 		if !hasField {
 			return nil, common.ColNotMatchFieldErr
 		}
+		if !fieldVal.CanSet() {
+			return nil, common.NilParamErr
+		}
 
 		var cell string
 		if rowIdx < len(row) {
@@ -273,6 +253,23 @@ func setRow2StructField(templateStruct interface{}, rowIdx int, row []string, Id
 				return nil, common.ParamTypeErrOn(rowIdx, colIdx, common.Bool)
 			}
 			fieldVal.SetBool(parseBool)
+		case reflect.Ptr, reflect.Struct:
+			if fieldVal.CanInterface() {
+				switch fieldVal.Interface().(type) {
+				case *time.Time, time.Time:
+					parse, parseErr := time.Parse("2006-01-02 15:04:05", cell)
+					if parseErr != nil {
+						return nil, common.ParamTypeErrOn(rowIdx, colIdx, common.Time)
+					}
+					if fieldVal.Kind() == reflect.Ptr {
+						fieldVal.Set(reflect.ValueOf(&parse))
+					} else {
+						fieldVal.Set(reflect.ValueOf(parse))
+					}
+				default:
+					return nil, common.TypeNotSupport(fieldName)
+				}
+			}
 		default:
 			return nil, common.TypeNotSupport(fieldName)
 		}
@@ -294,6 +291,9 @@ func setStruct2ExcelRow(sheet *xlsx.Sheet, value reflect.Value, fieldSlice []str
 	for _, fieldName := range fieldSlice {
 		fieldValue := value.FieldByName(fieldName)
 		cell = row.AddCell()
+		if !fieldValue.CanAddr() {
+			continue
+		}
 		switch fieldValue.Kind() {
 		case reflect.Int:
 			fallthrough
@@ -307,6 +307,26 @@ func setStruct2ExcelRow(sheet *xlsx.Sheet, value reflect.Value, fieldSlice []str
 			cell.Value = strconv.FormatFloat(fieldValue.Float(), 'E', -1, 64)
 		case reflect.Bool:
 			cell.Value = fmt.Sprintf("%t", fieldValue.Bool())
+		case reflect.Ptr:
+			if fieldValue.IsNil() {
+				continue
+			}
+			fieldValue.Elem()
+			fallthrough
+		case reflect.Struct:
+			if !fieldValue.IsZero() && fieldValue.CanInterface() {
+				interfaceObj := fieldValue.Interface()
+				switch interfaceObj.(type) {
+				case *time.Time:
+					ptr := interfaceObj.(*time.Time)
+					cell.Value = ptr.Format("2006-01-02 15:04:05")
+				case time.Time:
+					obj := interfaceObj.(time.Time)
+					cell.Value = obj.Format("2006-01-02 15:04:05")
+				default:
+					cell.Value = fieldValue.String()
+				}
+			}
 		case reflect.String:
 			fallthrough
 		default:
@@ -317,7 +337,7 @@ func setStruct2ExcelRow(sheet *xlsx.Sheet, value reflect.Value, fieldSlice []str
 }
 
 // CheckAndReadExcel 检查导入的excel文件格式, 并返回读取出的数据切片
-func CheckAndReadExcel(file *multipart.File, fileHeader *multipart.FileHeader) ([][]string, error) {
+func (mapper *importMapper) CheckAndReadExcel(file *multipart.File, fileHeader *multipart.FileHeader) ([][]string, error) {
 	var recordSlice [][]string
 	var readErr error
 	fileNameArr := strings.Split(fileHeader.Filename, ".")

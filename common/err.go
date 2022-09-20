@@ -1,5 +1,5 @@
 // Package common
-// @Author Administrator 2022/7/30 14:51:00
+// @Author Binary.H 2022/7/30 14:51:00
 package common
 
 import (
@@ -17,6 +17,7 @@ const (
 	Int   = "整数"
 	Float = "浮点数"
 	Bool  = "布尔值"
+	Time  = "时间格式"
 )
 
 type ExcelError struct {
